@@ -208,6 +208,10 @@
                 return 0;
             }
             return parseInt(matches[1], 10 /* radix */);
+        },
+
+        isSafari: function (userAgent, vendor) {
+            return (/Safari/).test(userAgent) && (/Apple Computer/).test(vendor);
         }
     };
 
@@ -573,8 +577,14 @@
 
                     transport.start(connection, function () { // success
                         // Firefox 11+ doesn't allow sync XHR withCredentials: https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest#withCredentials
+                        // Safari (both mobile and desktop) will crash if a synchronous request is made during unload
                         var isFirefox11OrGreater = signalR._.firefoxMajorVersion(window.navigator.userAgent) >= 11,
-                            asyncAbort = !!connection.withCredentials && isFirefox11OrGreater;
+                            asyncAbort = !!connection.withCredentials && isFirefox11OrGreater,
+                            unloadHandler =  function () {
+                                connection.log("Window unloading, stopping the connection.");
+
+                                connection.stop(asyncAbort);
+                            };
 
                         // The connection was aborted while initializing transports
                         if (connection.state === signalR.connectionState.disconnected) {
@@ -606,11 +616,17 @@
                             $(connection).triggerHandler(events.onStart);
 
                             // wire the stop handler for when the user leaves the page
-                            _pageWindow.bind("unload", function () {
-                                connection.log("Window unloading, stopping the connection.");
+                            _pageWindow.bind("unload", unloadHandler);
 
-                                connection.stop(asyncAbort);
-                            });
+                            if (signalR._.isSafari(window.navigator.userAgent, window.navigator.vendor)) {
+                                // Async XHRs will not fire during unload in Safari,
+                                // and synchronous XHRs will sometimes crash Safari if fired during unload.
+                                // Binding an async XHR to beforeunload in addition to the synchronous XHR
+                                // seems to prevent the crashing while still actually triggering an XHR.
+                                _pageWindow.bind("beforeunload", function () {
+                                    connection.stop(/* async */ true);
+                                });
+                            }
 
                             if (isFirefox11OrGreater) {
                                 // Firefox does not fire cross-domain XHRs in the normal unload handler on tab close.
@@ -618,9 +634,7 @@
                                 _pageWindow.bind("beforeunload", function () {
                                     // If connection.stop() runs runs in beforeunload and fails, it will also fail
                                     // in unload unless connection.stop() runs after a timeout.
-                                    window.setTimeout(function () {
-                                        connection.stop(asyncAbort);
-                                    }, 0);
+                                    window.setTimeout(unloadHandler, 0);
                                 });
                             }
                         }
